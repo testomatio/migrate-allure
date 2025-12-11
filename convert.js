@@ -46,6 +46,11 @@ function convertTestCases(inputFile, outputFile) {
         const allureId = record['allure_id'] ? formatAllureId(record['allure_id']) : '';
         let descriptionParts = [];
 
+        // Add description first if it exists
+        if (record['description'] && record['description'].trim()) {
+            descriptionParts.push(cleanHtml(record['description'].trim()));
+        }
+
         if (record['precondition'] && record['precondition'].trim()) {
             descriptionParts.push('### Preconditions\n\n' + cleanHtml(record['precondition'].trim()));
         }
@@ -62,12 +67,17 @@ function convertTestCases(inputFile, outputFile) {
         }
 
         const tags = extractTags(record);
-        const owner = record['Owner'] || record['Created By'] || '';
+        const owner = (record['Owner'] || record['Created By'] || '').replace(/_/g, ' ');
         const priority = mapPriority(record['Priority'] || record['Priority']);
         const folder = buildFolderHierarchy(record);
         const issues = extractJiraIssues(record);
         const labels = extractLabels(record);
         const status = mapStatus(record['automated']);
+
+        // Add Owner to end of description
+        if (owner) {
+            descriptionParts.push(`\n*Owner: ${owner}*`);
+        }
 
         const testCase = {
             'ID': allureId,
@@ -115,17 +125,20 @@ function mapStatus(automated) {
 }
 
 function mapPriority(priority) {
+    // Strip emojis from priority string
+    const cleanPriority = priority.replace(/[\u{1F300}-\u{1F9FF}]|[\u{2600}-\u{26FF}]|[\u{2700}-\u{27BF}]/gu, '').trim();
+
     const priorityMap = {
-        'Blocker': 'high',
-        'Critical': 'high',
-        'Major': 'normal',
-        'Minor': 'normal',
-        'Trivial': 'low',
-        '🔴 High': 'high',
-        '🟡 Medium': 'normal',
-        '🟢 Low': 'low'
+        'Blocker': 'critical',
+        'Critical': 'critical',
+        'Major': 'high',
+        'Minor': 'important',
+        'Trivial': 'normal',
+        'High': 'high',
+        'Medium': 'normal',
+        'Low': 'low'
     };
-    return priorityMap[priority] || 'normal';
+    return priorityMap[cleanPriority] || 'normal';
 }
 
 function parseScenario(scenario) {
@@ -146,7 +159,7 @@ function parseScenario(scenario) {
         else if (trimmedLine.match(/^\[step \d+\.\d+\]/)) {
             const expectedText = trimmedLine.replace(/^\[step \d+\.\d+\]\s*/, '');
             if (currentStep) {
-                currentStep += `\n  *Expected:* ${cleanHtml(expectedText)}`;
+                currentStep += `\n  ${cleanHtml(expectedText)}`;
             }
         }
         else if (trimmedLine && !trimmedLine.startsWith('[') && currentStep) {
@@ -221,7 +234,7 @@ function extractLabels(record) {
     const labels = [];
 
     const extractedColumns = [
-        'allure_id', 'name', 'scenario', 'precondition', 'tag', 'Owner', 'Priority', 'link', 'Suite', 'automated',
+        'allure_id', 'name', 'scenario', 'precondition', 'description', 'tag', 'Owner', 'Priority', 'link', 'Suite', 'automated',
         'Epic', 'Feature', 'Story', 'SubStory'
     ];
 
@@ -290,7 +303,7 @@ function extractJiraIssues(record) {
     // Extract from jira-* columns and common fields
     const fieldsToCheck = Object.keys(record).filter(key =>
         key.toLowerCase().startsWith('jira-')
-    ).concat(['link', 'References', 'description', 'expected_result']);
+    ).concat(['link', 'References']);
 
     fieldsToCheck.forEach(field => {
         if (record[field] && record[field].trim()) {
