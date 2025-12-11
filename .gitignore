@@ -133,3 +133,4 @@ dist
 demo.csv
 demo_Testomatio.csv
 allure.csv
+*.csv

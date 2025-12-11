@@ -24,12 +24,17 @@ function convertTestCases(inputFile, outputFile) {
     const inputData = fs.readFileSync(inputFile, 'utf-8');
     const records = csv.parse(inputData, {
         columns: true,
-        skip_empty_lines: true
+        skip_empty_lines: true,
+        delimiter: ';',
+        quote: '"',
+        escape: '"',
+        relax_column_count: true,
+        relax_quotes: true
     });
 
-    // Define required columns
+    // Define required columns for Allure TestOps
     const requiredColumns = [
-        'Entity Key', 'Test Case Summary', 'Test Case Folder Path',
+        'allure_id', 'name', 'scenario',
     ];
 
     // Validate columns
@@ -45,88 +50,91 @@ function convertTestCases(inputFile, outputFile) {
     const transformedData = [];
 
     records.forEach(record => {
-        if (record['Test Case Summary']) {
-            // If we encounter a new test case summary, push the previous one to the transformed data
-            if (currentTestCase) {
-                transformedData.push(currentTestCase);
-            }
+        // Process each record as a test case
+        console.log('✅', record['name']);
 
-            console.log('✅', record['Test Case Summary'])
+        // Format Allure ID with T prefix and 8 digits
+        const allureId = record['allure_id'] ? formatAllureId(record['allure_id']) : '';
 
-            // Start a new test case
-            currentTestCase = {
-                'ID': `TS${record['Entity Key']}`,
-                'Title': record['Test Case Summary'],
-                'Folder': record['Test Case Folder Path'],
-                'Emoji': '',
-                'Priority': mapPriority(record['Test Case Priority']),
-                'Tags': record['Label(s)']?.split(',')?.map(tag => tag.trim())?.join(','),
-                'Owner': record['Created By']?.split('[')[0],
-                'Description': '',
-                'Examples': '',
-                'Labels': '',
-                'Url': '',
-                'Matched': '',
-                'Steps': []
-            };
-        }
-
-        // Add steps to the current test case
-        const stepDescription = record['Step Description'] || '';
-        const stepExpectedOutcome = record['Step Expected Outcome(Plain Text)'] || '';
-
-        if (stepDescription && !stepDescription.includes('Preconditions:')) {
-          if (!currentTestCase.Steps.join(' ').includes('## Steps')) {
-            currentTestCase.Steps.push('\n\n## Steps\n');
-          }
-          currentTestCase.Steps.push(`* ${cleanHtml(stepDescription.trim())}`);
-          if (stepExpectedOutcome) {
-              currentTestCase.Steps.push(`  *Expected:* ${cleanHtml(stepExpectedOutcome.trim())}`);
-          }
-        }
+        // Build description with preconditions and steps
+        let descriptionParts = [];
 
         // Add preconditions if they exist
-        if (stepDescription.includes('Preconditions:')) {
-            currentTestCase.Steps.push('\n## Precondition\n\n' + cleanHtml(stepDescription)
-                .split('Preconditions:')[1]
-                .trim());
+        if (record['precondition'] && record['precondition'].trim()) {
+            descriptionParts.push('### Preconditions\n\n' + cleanHtml(record['precondition'].trim()));
         }
-    });
 
-    // Push the last test case to the transformed data
-    if (currentTestCase) {
-        transformedData.push(currentTestCase);
-    }
+        // Parse and format steps from scenario
+        if (record['scenario'] && record['scenario'].trim()) {
+            const steps = parseScenario(record['scenario']);
+            if (steps.length > 0) {
+                descriptionParts.push('### Steps\n\n' + steps.join('\n'));
+            }
+        }
 
-    // Transform the data to the target format
-    const finalData = transformedData.map(testCase => {
-        return {
-            'ID': testCase.ID,
-            'Title': testCase.Title,
-            'Folder': testCase.Folder,
+        // Add expected result if it exists
+        if (record['expected_result'] && record['expected_result'].trim()) {
+            descriptionParts.push('### Expected Result\n\n' + cleanHtml(record['expected_result'].trim()));
+        }
+
+        // Extract tags, links, and other metadata
+        const tags = extractTags(record);
+        const owner = record['Owner'] || record['Created By'] || '';
+        const priority = mapPriority(record['Priority'] || record['Priority']);
+        const url = extractLinks(record);
+        const folder = buildFolderHierarchy(record);
+        const issues = extractJiraIssues(record);
+        const labels = extractLabels(record);
+        const status = mapStatus(record['automated']);
+
+        // Create test case
+        const testCase = {
+            'ID': allureId,
+            'Title': record['name'] || '',
+            'Folder': folder,
             'Emoji': '',
-            'Priority': testCase.Priority,
-            'Tags': testCase.Tags,
-            'Owner': testCase.Owner,
-            'Description': testCase.Steps.join('\n'),
+            'Priority': priority,
+            'Tags': tags,
+            'Owner': owner,
+            'Status': status,
+            'Description': descriptionParts.join('\n\n'),
             'Examples': '',
-            'Labels': '',
-            'Url': '',
-            'Matched': ''
+            'Labels': labels,
+            'Issues': issues
         };
+
+        transformedData.push(testCase);
     });
+
+    // Transform the data to the target format (already done above)
+    const finalData = transformedData;
 
     // Write to output CSV
     const output = stringify(finalData, {
         header: true,
         columns: [
             'ID', 'Title', 'Folder', 'Emoji', 'Priority',
-            'Tags', 'Owner', 'Description', 'Examples', 'Labels', 'Url', 'Matched'
+            'Tags', 'Owner', 'Status', 'Description', 'Examples', 'Labels', 'Issues'
         ]
     });
 
     fs.writeFileSync(outputFile, output);
     console.log(`Conversion complete. Output written to ${outputFile}`);
+}
+
+function formatAllureId(allureId) {
+    // Convert to string, pad with zeros to 8 digits, and add T prefix
+    const idStr = allureId.toString();
+    const paddedId = idStr.padStart(8, '0');
+    return `T${paddedId}`;
+}
+
+function mapStatus(automated) {
+    if (automated === 'true' || automated === true) {
+        return 'automated';
+    } else {
+        return 'manual';
+    }
 }
 
 function mapPriority(priority) {
@@ -135,9 +143,245 @@ function mapPriority(priority) {
         'Critical': 'high',
         'Major': 'normal',
         'Minor': 'normal',
-        'Trivial': 'low'
+        'Trivial': 'low',
+        '🔴 High': 'high',
+        '🟡 Medium': 'normal',
+        '🟢 Low': 'low'
     };
     return priorityMap[priority] || 'normal';
+}
+
+function parseScenario(scenario) {
+    const steps = [];
+    const lines = scenario.split('\n');
+    let currentStep = null;
+
+    for (const line of lines) {
+        const trimmedLine = line.trim();
+
+        // Check if it's a step (starts with [step N])
+        if (trimmedLine.match(/^\[step \d+\]/)) {
+            // Add previous step if it exists
+            if (currentStep) {
+                steps.push(currentStep);
+            }
+
+            // Start new step
+            const stepText = trimmedLine.replace(/^\[step \d+\]\s*/, '');
+            currentStep = `* ${cleanHtml(stepText)}`;
+        }
+        // Check if it's an expected result (starts with \t[step N.M])
+        else if (trimmedLine.match(/^\[step \d+\.\d+\]/)) {
+            const expectedText = trimmedLine.replace(/^\[step \d+\.\d+\]\s*/, '');
+            if (currentStep) {
+                currentStep += `\n  *Expected:* ${cleanHtml(expectedText)}`;
+            }
+        }
+        // Handle non-empty lines that don't have step prefixes but are part of current step
+        else if (trimmedLine && !trimmedLine.startsWith('[') && currentStep) {
+            // This is a continuation of the current step (like "Fail request:" and its details)
+            currentStep += `\n    ${cleanHtml(trimmedLine)}`;
+        }
+        // Handle sub-items (indented lines starting with -)
+        else if (trimmedLine.startsWith('-') && currentStep) {
+            // This is part of expected results or sub-items
+            const subItem = trimmedLine.replace(/^\-\s*/, '');
+            if (subItem) {
+                currentStep += `\n    ${cleanHtml(subItem)}`;
+            }
+        }
+        // Handle standalone non-step lines only if they come before any step
+        else if (trimmedLine && !trimmedLine.startsWith('[') && !trimmedLine.startsWith('-') && !currentStep) {
+            // This is a standalone line before any steps - create it as a step
+            currentStep = `* ${cleanHtml(trimmedLine)}`;
+        }
+    }
+
+    // Add the last step
+    if (currentStep) {
+        steps.push(currentStep);
+    }
+
+    return steps;
+}
+
+function buildFolderHierarchy(record) {
+    const folderParts = [];
+    const pathOrder = ['Epic', 'Feature', 'Story', 'SubStory'];
+
+    // Map path order to folder number
+    const folderMapping = {
+        'Epic': 'Folder1',
+        'Feature': 'Folder2',
+        'Story': 'Folder3',
+        'SubStory': 'Folder4'
+    };
+
+    // Build path by preferring Folder* values over Epic/Feature/Story at corresponding levels
+    pathOrder.forEach((field, index) => {
+        const folderField = folderMapping[field];
+
+        // Check if corresponding Folder* exists
+        if (record[folderField] && record[folderField].trim()) {
+            // Use Folder* value
+            folderParts.push(record[folderField].trim());
+        } else if (record[field] && record[field].trim()) {
+            // Use Epic/Feature/Story value (first one only)
+            const firstValue = record[field].split(',')[0].trim();
+            if (firstValue) {
+                folderParts.push(firstValue);
+            }
+        }
+    });
+
+    // Add additional Folder* values beyond Folder4
+    for (let i = 5; i <= 8; i++) {
+        const folderField = `Folder${i}`;
+        if (record[folderField] && record[folderField].trim()) {
+            folderParts.push(record[folderField].trim());
+        }
+    }
+
+    // If no path built yet, try other folder fields
+    if (folderParts.length === 0) {
+        ['Suite', 'Folder', 'Test Suite', 'Test Suite Path'].forEach(field => {
+            if (record[field] && record[field].trim()) {
+                folderParts.push(record[field].trim());
+            }
+        });
+    }
+
+    // Replace / with | in each folder part to avoid conflicts with Testomat separator
+    return folderParts.map(part => part.replace(/\//g, '|')).join('/');
+}
+
+function extractLabels(record) {
+    const labels = [];
+
+    // Define columns that are already extracted
+    const extractedColumns = [
+        'allure_id', 'name', 'scenario', 'precondition', 'tag', 'Owner', 'Priority', 'link', 'Suite', 'automated',
+        'Epic', 'Feature', 'Story', 'SubStory'
+    ];
+
+    for (const [key, value] of Object.entries(record)) {
+        // Skip if value is empty or null
+        if (!value || !value.trim()) {
+            continue;
+        }
+
+        // Skip if already extracted
+        if (extractedColumns.includes(key)) {
+            continue;
+        }
+
+        // Skip jira-* columns (handled separately)
+        if (key.toLowerCase().startsWith('jira-')) {
+            continue;
+        }
+
+        // Skip Folder* columns
+        if (key.toLowerCase().startsWith('folder')) {
+            continue;
+        }
+
+        // Skip multi-word/multi-line values (contains newlines, quotes, or long text)
+        const cleanValue = value.trim();
+        if (cleanValue.includes('\n') || cleanValue.includes('"') || cleanValue.length > 100) {
+            continue;
+        }
+
+        // Add as key:value label
+        labels.push(`${key}:${cleanValue}`);
+    }
+
+    // Add Epic/Feature/Story/SubStory as labels with ALL values (including first ones used in path)
+    ['Epic', 'Feature', 'Story', 'SubStory'].forEach(field => {
+        if (record[field] && record[field].trim()) {
+            const values = record[field].split(',').map(v => v.trim()).filter(v => v);
+            // Add all values as labels
+            values.forEach(value => {
+                labels.push(`${field}:${value}`);
+            });
+        }
+    });
+
+    // Add important fields that should always be included as labels (skip if already added)
+    const importantFields = ['status'];
+    for (const field of importantFields) {
+        if (record[field] && record[field].trim()) {
+            const labelValue = `${field}:${record[field].trim()}`;
+            // Check if this label already exists to avoid duplicates
+            if (!labels.some(label => label.startsWith(`${field}:`))) {
+                labels.push(labelValue);
+            }
+        }
+    }
+
+    return labels.join(', ');
+}
+
+function extractTags(record) {
+    const tags = [];
+
+    // Process tag field - split by comma and replace spaces with underscores
+    if (record['tag'] && record['tag'].trim()) {
+        const tagField = record['tag'].trim();
+        // Split by comma and clean each tag
+        const splitTags = tagField.split(',').map(tag =>
+            tag.trim().replace(/\s+/g, '_')
+        );
+        tags.push(...splitTags);
+    }
+
+    // Don't add Feature/Epic/Story to tags since they're now used for folders
+    // But we can still add other metadata as tags (also replace spaces with underscores)
+    if (record['SubStory']) tags.push(record['SubStory'].trim().replace(/\s+/g, '_'));
+    if (record['Test Type']) tags.push(record['Test Type'].trim().replace(/\s+/g, '_'));
+    if (record['Automation Type']) tags.push(record['Automation Type'].trim().replace(/\s+/g, '_'));
+
+    return tags.join(',');
+}
+
+function extractJiraIssues(record) {
+    const jiraIssues = [];
+    const jiraPattern = /([A-Z]+-\d+)/g;
+
+    // Check all columns for jira-* columns
+    for (const [key, value] of Object.entries(record)) {
+        if (key.toLowerCase().startsWith('jira-') && value && value.trim()) {
+            // Extract JIRA IDs from URLs or plain text
+            const matches = value.match(jiraPattern);
+            if (matches) {
+                jiraIssues.push(...matches);
+            }
+        }
+    }
+
+    // Also check common fields that might contain JIRA issues
+    const commonFields = ['link', 'References', 'description', 'expected_result'];
+    for (const field of commonFields) {
+        if (record[field] && record[field].trim()) {
+            const matches = record[field].match(jiraPattern);
+            if (matches) {
+                jiraIssues.push(...matches);
+            }
+        }
+    }
+
+    // Remove duplicates and join with comma
+    return [...new Set(jiraIssues)].join(', ');
+}
+
+function extractLinks(record) {
+    const links = [];
+
+    // Extract link from the link field
+    if (record['link'] && record['link'].trim()) {
+        links.push(record['link'].trim());
+    }
+
+    return links.join(', ');
 }
 
 function cleanHtml(text) {
@@ -145,6 +389,8 @@ function cleanHtml(text) {
     return text
         .replace(/<br\s*\/?>/gi, '\n')  // Replace <br> with newline
         .replace(/<\/?(p|span|div|ul|li)[^>]*>/gi, '') // Remove p, ul, li tags
+        .replace(/</g, '≺')  // Replace < with UTF character
+        .replace(/>/g, '≻')  // Replace > with UTF character
         .replace(/\n\s*\n/g, '\n')  // Remove multiple newlines
         .trim();
 }
